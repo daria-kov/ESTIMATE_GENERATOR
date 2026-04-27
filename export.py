@@ -17,7 +17,7 @@ class EstimateExcelExporter:
     # Ширина колонок
     COLUMN_WIDTHS = {
         1: 5,    # № п/п
-        2: 18,   # Обоснование
+        2: 30,   # Обоснование
         3: 50,   # Наименование
         4: 12,   # Ед. изм.
         5: 12,   # Количество на ед.
@@ -76,6 +76,15 @@ class EstimateExcelExporter:
 
     STYLE_RESOURCE = {
         'font': Font(size=9, name='Calibri'),
+        'alignment': Alignment(horizontal='right', vertical='center'),
+        'border': Border(
+            left=Side(style='thin'), right=Side(style='thin'),
+            top=Side(style='thin'), bottom=Side(style='thin')
+        ),
+    }
+
+    STYLE_REGULAR = {
+        'font': Font(size=9, name='Calibri'),
         'alignment': Alignment(horizontal='left', vertical='center'),
         'border': Border(
             left=Side(style='thin'), right=Side(style='thin'),
@@ -85,7 +94,7 @@ class EstimateExcelExporter:
 
     STYLE_SUBTOTAL = {
         'font': Font(bold=True, size=10, name='Calibri'),
-        'alignment': Alignment(horizontal='right', vertical='center'),
+        'alignment': Alignment(horizontal='left', vertical='center'),
         'border': Border(
             left=Side(style='thin'), right=Side(style='thin'),
             top=Side(style='thin'), bottom=Side(style='thin')
@@ -108,7 +117,7 @@ class EstimateExcelExporter:
         self.ws = self.wb.active
         self.ws.title = "Лист1"
         self.current_row = 1
-        self.current_item_num = 12  # Номер первой позиции
+        self.current_item_num = 1
 
     def _apply_style(self, cell, style: dict) -> None:
         for key, value in style.items():
@@ -120,15 +129,13 @@ class EstimateExcelExporter:
             start_column=min_col, end_column=max_col
         )
 
-    def _format_number(self, value: Decimal, decimals: int = 2) -> Optional[float]:
-        """Форматирует число с указанным количеством знаков после запятой.
-           Если число равно 1, возвращает None (пустая ячейка)."""
+    def _format_number(self, value: Decimal) -> Optional[float]:
+        """Форматирует число, НЕ округляет. Если число равно 1, возвращает None."""
         if value is None:
             return None
-        # Проверяем, равно ли число 1 (с учётом погрешности)
         if abs(float(value) - 1.0) < 0.000001:
             return None
-        return round(float(value), decimals)
+        return float(value)
 
     def _write_metadata_header(self) -> None:
         """Шапка с метаданными (строки 1-25)"""
@@ -469,6 +476,7 @@ class EstimateExcelExporter:
 
     def _write_section(self, section: Section) -> None:
         """Запись раздела сметы"""
+        # Заголовок раздела
         self._merge_cells(1, 12, self.current_row, self.current_row)
         cell = self.ws.cell(row=self.current_row, column=1, value=section.full_name)
         self._apply_style(cell, self.STYLE_SECTION)
@@ -478,7 +486,7 @@ class EstimateExcelExporter:
             item.row_num = self.current_item_num
             self.current_item_num += 1
 
-            self._write_work_item(item)
+            self._write_work_item(item, item.conversion_string)
             self._write_work_item_totals(item)
 
             for abs_res in item.abstract_resources:
@@ -486,85 +494,93 @@ class EstimateExcelExporter:
                 self.current_item_num += 1
                 self._write_abstract_resource_item(abs_res)
 
+    def _write_work_item(self, item: WorkItem, conversion_string: str = None) -> None:
+            """Запись позиции ГЭСН"""
+
+            # Строка с ГЭСН (основная)
+            self.ws.cell(row=self.current_row, column=1, value=item.row_num)
+            self.ws.cell(row=self.current_row, column=2, value=item.code)
+            self.ws.cell(row=self.current_row, column=3, value=item.name)
+            self.ws.cell(row=self.current_row, column=4, value=item.unit)
+            self.ws.cell(row=self.current_row, column=5, value=float(item.quantity))
+            self.ws.cell(row=self.current_row, column=6, value="1")
+            self.ws.cell(row=self.current_row, column=7, value=float(item.quantity))
+
+            for col in range(1, 8):
+                self._apply_style(self.ws.cell(row=self.current_row, column=col), self.STYLE_WORK_MAIN)
             self.current_row += 1
 
-    def _write_work_item(self, item: WorkItem) -> None:
-        """Запись позиции ГЭСН"""
+            # ✅ Строка с объёмом работ (если есть)
+            if item.conversion_string:
+                cell = self.ws.cell(row=self.current_row, column=3, value=f"Объем={item.conversion_string}")
+                self._apply_style(cell, self.STYLE_REGULAR)
+                self.current_row += 1
 
-        self.ws.cell(row=self.current_row, column=1, value=item.row_num)
-        self.ws.cell(row=self.current_row, column=2, value=item.code)
-        self.ws.cell(row=self.current_row, column=3, value=item.name)
-        self.ws.cell(row=self.current_row, column=4, value=item.unit)
-        self.ws.cell(row=self.current_row, column=5, value=float(item.quantity))
-        self.ws.cell(row=self.current_row, column=6, value="1")
-        self.ws.cell(row=self.current_row, column=7, value=float(item.quantity))
+            # ✅ ВСЕ коэффициенты (должны быть до разбора ресурсов)
+            for coef in item.coefficients:
+                cell = self.ws.cell(row=self.current_row, column=2, value=coef.code)
+                self._apply_style(cell, self.STYLE_RESOURCE)
+                self._merge_cells(3, 12, self.current_row, self.current_row)
+                cell = self.ws.cell(row=self.current_row, column=3, value=coef.description)
+                self._apply_style(cell, self.STYLE_REGULAR)
+                self.current_row += 1
 
-        for col in range(1, 8):
-            self._apply_style(self.ws.cell(row=self.current_row, column=col), self.STYLE_WORK_MAIN)
-        self.current_row += 1
+            # ✅ ПОСЛЕ коэффициентов начинаем разбор ресурсов
+            # Группа ОТ (1. ОТ (ЗТ))
+            labor_resources = [r for r in item.resources if r.resource_type == ResourceType.LABOR]
 
-        for coef in item.coefficients:
-            self.ws.cell(row=self.current_row, column=2, value=coef.code)
-            self._merge_cells(2, 12, self.current_row, self.current_row)
-            cell = self.ws.cell(row=self.current_row, column=2, value=coef.description)
-            self._apply_style(cell, self.STYLE_COEFFICIENT)
-            self.current_row += 1
-
-        # Группа ОТ
-        labor_resources = [r for r in item.resources if r.resource_type == ResourceType.LABOR]
-
-        self.ws.cell(row=self.current_row, column=2, value="1")
-        self.ws.cell(row=self.current_row, column=3, value="ОТ (ЗТ)")
-        self.ws.cell(row=self.current_row, column=4, value="чел.-ч")
-        group_total_ot = sum(r.total_cost for r in labor_resources)
-        self.ws.cell(row=self.current_row, column=12, value=round(float(group_total_ot), 2))
-        self._apply_style(self.ws.cell(row=self.current_row, column=2), self.STYLE_RESOURCE)
-        self._apply_style(self.ws.cell(row=self.current_row, column=12), self.STYLE_RESOURCE)
-        self.current_row += 1
-
-        for res in labor_resources:
-            self._write_resource_detail(res)
-
-        # Группа ЭМ и ОТм
-        equipment_resources = [r for r in item.resources if r.resource_type == ResourceType.EQUIPMENT]
-        operator_resources = [r for r in item.resources if r.resource_type == ResourceType.LABOR_OPERATOR]
-
-        self.ws.cell(row=self.current_row, column=2, value="2")
-        self.ws.cell(row=self.current_row, column=3, value="ЭМ")
-        self.ws.cell(row=self.current_row, column=4, value="")
-        group_total_em = sum(r.total_cost for r in equipment_resources)
-        self.ws.cell(row=self.current_row, column=12, value=round(float(group_total_em), 2))
-        self._apply_style(self.ws.cell(row=self.current_row, column=2), self.STYLE_RESOURCE)
-        self._apply_style(self.ws.cell(row=self.current_row, column=12), self.STYLE_RESOURCE)
-        self.current_row += 1
-
-        self.ws.cell(row=self.current_row, column=3, value="ОТм(ЗТм)")
-        self.ws.cell(row=self.current_row, column=4, value="чел.-ч")
-        group_total_otm = sum(r.total_cost for r in operator_resources)
-        self.ws.cell(row=self.current_row, column=12, value=round(float(group_total_otm), 2))
-        self._apply_style(self.ws.cell(row=self.current_row, column=3), self.STYLE_RESOURCE)
-        self._apply_style(self.ws.cell(row=self.current_row, column=12), self.STYLE_RESOURCE)
-        self.current_row += 1
-
-        for res in item.resources:
-            if res.resource_type in [ResourceType.EQUIPMENT, ResourceType.LABOR_OPERATOR]:
-                self._write_resource_detail(res)
-
-        # Группа М - только если есть материальные ресурсы
-        material_resources = [r for r in item.resources if r.resource_type == ResourceType.MATERIAL]
-
-        if material_resources:
-            self.ws.cell(row=self.current_row, column=2, value="4")
-            self.ws.cell(row=self.current_row, column=3, value="М")
-            self.ws.cell(row=self.current_row, column=4, value="")
-            group_total_m = sum(r.total_cost for r in material_resources)
-            self.ws.cell(row=self.current_row, column=12, value=round(float(group_total_m), 2))
+            self.ws.cell(row=self.current_row, column=2, value="1")
+            self.ws.cell(row=self.current_row, column=3, value="ОТ (ЗТ)")
+            self.ws.cell(row=self.current_row, column=4, value="чел.-ч")
+            group_total_ot = sum(r.total_cost for r in labor_resources)
+            self.ws.cell(row=self.current_row, column=12, value=float(group_total_ot))
             self._apply_style(self.ws.cell(row=self.current_row, column=2), self.STYLE_RESOURCE)
             self._apply_style(self.ws.cell(row=self.current_row, column=12), self.STYLE_RESOURCE)
             self.current_row += 1
 
-            for res in material_resources:
+            for res in labor_resources:
                 self._write_resource_detail(res)
+
+            # Группа ЭМ и ОТм (2. ЭМ и ОТм(ЗТм))
+            equipment_resources = [r for r in item.resources if r.resource_type == ResourceType.EQUIPMENT]
+            operator_resources = [r for r in item.resources if r.resource_type == ResourceType.LABOR_OPERATOR]
+
+            self.ws.cell(row=self.current_row, column=2, value="2")
+            self.ws.cell(row=self.current_row, column=3, value="ЭМ")
+            self.ws.cell(row=self.current_row, column=4, value="")
+            group_total_em = sum(r.total_cost for r in equipment_resources)
+            self.ws.cell(row=self.current_row, column=12, value=float(group_total_em))
+            self._apply_style(self.ws.cell(row=self.current_row, column=2), self.STYLE_RESOURCE)
+            self._apply_style(self.ws.cell(row=self.current_row, column=12), self.STYLE_RESOURCE)
+            self.current_row += 1
+
+            self.ws.cell(row=self.current_row, column=3, value="ОТм(ЗТм)")
+            self.ws.cell(row=self.current_row, column=4, value="чел.-ч")
+            group_total_otm = sum(r.total_cost for r in operator_resources)
+            self.ws.cell(row=self.current_row, column=12, value=float(group_total_otm))
+            self._apply_style(self.ws.cell(row=self.current_row, column=3), self.STYLE_REGULAR)
+            self._apply_style(self.ws.cell(row=self.current_row, column=12), self.STYLE_RESOURCE)
+            self.current_row += 1
+
+            for res in item.resources:
+                if res.resource_type in [ResourceType.EQUIPMENT, ResourceType.LABOR_OPERATOR]:
+                    self._write_resource_detail(res)
+
+            # Группа М (4. М)
+            material_resources = [r for r in item.resources if r.resource_type == ResourceType.MATERIAL]
+
+            if material_resources:
+                self.ws.cell(row=self.current_row, column=2, value="4")
+                self.ws.cell(row=self.current_row, column=3, value="М")
+                self.ws.cell(row=self.current_row, column=4, value="")
+                group_total_m = sum(r.total_cost for r in material_resources)
+                self.ws.cell(row=self.current_row, column=12, value=float(group_total_m))
+                self._apply_style(self.ws.cell(row=self.current_row, column=2), self.STYLE_RESOURCE)
+                self._apply_style(self.ws.cell(row=self.current_row, column=12), self.STYLE_RESOURCE)
+                self.current_row += 1
+
+                for res in material_resources:
+                    self._write_resource_detail(res)
 
     def _write_resource_detail(self, res: Resource) -> None:
         """Запись детальной строки ресурса"""
@@ -574,40 +590,33 @@ class EstimateExcelExporter:
         self.ws.cell(row=self.current_row, column=3, value=res.name)
         self.ws.cell(row=self.current_row, column=4, value=res.unit)
 
-        # Колонка 5: количество на единицу
-        val = self._format_number(res.quantity_per_unit, 2)
+        val = self._format_number(res.quantity_per_unit)
         if val is not None:
             self.ws.cell(row=self.current_row, column=5, value=val)
 
-        # Колонка 6: коэффициент (если не равен 1)
-        val = self._format_number(res.coefficient, 4)
+        val = self._format_number(res.coefficient)
         if val is not None:
             self.ws.cell(row=self.current_row, column=6, value=val)
 
-        # Колонка 7: всего с учётом коэффициентов
-        val = self._format_number(res.quantity_total, 4)
+        val = self._format_number(res.quantity_total)
         if val is not None:
             self.ws.cell(row=self.current_row, column=7, value=val)
 
         if res.code not in SERVICE_CODES:
-            # Колонка 8: базисная цена
             if res.base_price:
-                val = self._format_number(res.base_price, 2)
+                val = self._format_number(res.base_price)
                 if val is not None:
                     self.ws.cell(row=self.current_row, column=8, value=val)
 
-            # Колонка 9: индекс (если не равен 1)
-            val = self._format_number(res.index, 2)
+            val = self._format_number(res.index)
             if val is not None:
                 self.ws.cell(row=self.current_row, column=9, value=val)
 
-            # Колонка 10: текущая цена
-            val = self._format_number(res.current_price, 2)
+            val = self._format_number(res.current_price)
             if val is not None:
                 self.ws.cell(row=self.current_row, column=10, value=val)
 
-        # Колонка 12: всего стоимость
-        val = self._format_number(res.total_cost, 2)
+        val = self._format_number(res.total_cost)
         if val is not None:
             self.ws.cell(row=self.current_row, column=12, value=val)
 
@@ -617,98 +626,84 @@ class EstimateExcelExporter:
         self.current_row += 1
 
     def _write_work_item_totals(self, item: WorkItem) -> None:
-        """
-        Итоговые строки после ГЭСН:
-        - Итого прямые затраты
-        - ФОТ
-        - НР
-        - СП
-        - Всего по позиции
-        """
+        """Итоговые строки после ГЭСН"""
 
-        # 1. Итого прямые затраты
-        self._merge_cells(2, 3, self.current_row, self.current_row)
-        cell = self.ws.cell(row=self.current_row, column=2, value="Итого прямые затраты")
+        # 1. Итого прямые затраты (объединяем только колонки 3-11)
+        self._merge_cells(3, 11, self.current_row, self.current_row)
+        cell = self.ws.cell(row=self.current_row, column=3, value="Итого прямые затраты")
         self._apply_style(cell, self.STYLE_SUBTOTAL)
-        self.ws.cell(row=self.current_row, column=12, value=round(float(item.direct_costs), 2))
-        self._apply_style(self.ws.cell(row=self.current_row, column=12), self.STYLE_SUBTOTAL)
+        sum_cell = self.ws.cell(row=self.current_row, column=12, value=float(item.direct_costs))
+        self._apply_style(sum_cell, self.STYLE_TOTAL)
         self.current_row += 1
 
-        # 2. ФОТ
-        self._merge_cells(2, 3, self.current_row, self.current_row)
-        cell = self.ws.cell(row=self.current_row, column=2, value="ФОТ")
-        self._apply_style(cell, self.STYLE_SUBTOTAL)
-        self.ws.cell(row=self.current_row, column=12, value=round(float(item.fot), 2))
-        self._apply_style(self.ws.cell(row=self.current_row, column=12), self.STYLE_SUBTOTAL)
+        # 2. ФОТ (объединяем только колонки 3-11)
+        self._merge_cells(3, 11, self.current_row, self.current_row)
+        cell = self.ws.cell(row=self.current_row, column=3, value="ФОТ")
+        self._apply_style(cell, self.STYLE_REGULAR)
+        sum_cell = self.ws.cell(row=self.current_row, column=12, value=float(item.fot))
+        self._apply_style(sum_cell, self.STYLE_RESOURCE)
         self.current_row += 1
 
         # 3. НР (накладные расходы)
         if hasattr(item, 'base_nr_percent') and item.base_nr_percent:
             nr_amount = item.fot * (item.nr_percent / Decimal("100"))
+            work_type_name = getattr(item, 'nr_work_type', item.name) if hasattr(item, 'nr_work_type') else item.name
 
-            # Обоснование
-            self.ws.cell(row=self.current_row, column=2, value=f"Пр/812-{item.nr_code}-1")
-
-            # Наименование
-            self._merge_cells(2, 3, self.current_row, self.current_row)
-            cell = self.ws.cell(row=self.current_row, column=2, value=f"НР {item.name[:40]}...")
-            self._apply_style(cell, self.STYLE_RESOURCE)
-
-            # Единица измерения (%)
+            nr_code_with_order = f"Пр/812-{item.nr_code}, Приказ № 812/пр от 21.12.2020 п.25"
+            self.ws.cell(row=self.current_row, column=2, value=nr_code_with_order)
+            self.ws.cell(row=self.current_row, column=3, value=f"НР {work_type_name}")
             self.ws.cell(row=self.current_row, column=4, value="%")
 
-            # Колонка 5: базовый процент
-            val = self._format_number(item.base_nr_percent, 0)
+            val = self._format_number(item.base_nr_percent)
             if val is not None:
                 self.ws.cell(row=self.current_row, column=5, value=val)
 
-            # Колонка 6: понижающий коэффициент
             if hasattr(item, 'nr_reduction') and item.nr_reduction:
-                val = self._format_number(item.nr_reduction, 2)
+                val = self._format_number(item.nr_reduction)
                 if val is not None:
                     self.ws.cell(row=self.current_row, column=6, value=val)
 
-            # Колонка 7: эффективный процент
-            val = self._format_number(item.nr_percent, 1)
+            val = self._format_number(item.nr_percent)
             if val is not None:
                 self.ws.cell(row=self.current_row, column=7, value=val)
 
-            # Колонка 12: сумма
-            self.ws.cell(row=self.current_row, column=12, value=round(float(nr_amount), 2))
-            self._apply_style(self.ws.cell(row=self.current_row, column=12), self.STYLE_RESOURCE)
+            sum_cell = self.ws.cell(row=self.current_row, column=12, value=float(nr_amount))
+            self._apply_style(sum_cell, self.STYLE_RESOURCE)
+
+            for col in range(2, 13):
+                self._apply_style(self.ws.cell(row=self.current_row, column=col), self.STYLE_REGULAR)
+
             self.current_row += 1
 
         # 4. СП (сметная прибыль)
         if hasattr(item, 'base_sp_percent') and item.base_sp_percent:
             sp_amount = item.fot * (item.sp_percent / Decimal("100"))
+            work_type_name = getattr(item, 'sp_work_type', item.name) if hasattr(item, 'sp_work_type') else item.name
 
-            self.ws.cell(row=self.current_row, column=2, value=f"Пр/774-{item.sp_code}")
-
-            self._merge_cells(2, 3, self.current_row, self.current_row)
-            cell = self.ws.cell(row=self.current_row, column=2, value=f"СП {item.name[:40]}...")
-            self._apply_style(cell, self.STYLE_RESOURCE)
-
+            sp_code_with_order = f"Пр/774-{item.sp_code}, Приказ № 774/пр от 11.12.2020 п.16"
+            self.ws.cell(row=self.current_row, column=2, value=sp_code_with_order)
+            self.ws.cell(row=self.current_row, column=3, value=f"СП {work_type_name}")
             self.ws.cell(row=self.current_row, column=4, value="%")
 
-            # Колонка 5: базовый процент
-            val = self._format_number(item.base_sp_percent, 0)
+            val = self._format_number(item.base_sp_percent)
             if val is not None:
                 self.ws.cell(row=self.current_row, column=5, value=val)
 
-            # Колонка 6: понижающий коэффициент
             if hasattr(item, 'sp_reduction') and item.sp_reduction:
-                val = self._format_number(item.sp_reduction, 2)
+                val = self._format_number(item.sp_reduction)
                 if val is not None:
                     self.ws.cell(row=self.current_row, column=6, value=val)
 
-            # Колонка 7: эффективный процент
-            val = self._format_number(item.sp_percent, 1)
+            val = self._format_number(item.sp_percent)
             if val is not None:
                 self.ws.cell(row=self.current_row, column=7, value=val)
 
-            # Колонка 12: сумма
-            self.ws.cell(row=self.current_row, column=12, value=round(float(sp_amount), 2))
-            self._apply_style(self.ws.cell(row=self.current_row, column=12), self.STYLE_RESOURCE)
+            sum_cell = self.ws.cell(row=self.current_row, column=12, value=float(sp_amount))
+            self._apply_style(sum_cell, self.STYLE_RESOURCE)
+
+            for col in range(2, 13):
+                self._apply_style(self.ws.cell(row=self.current_row, column=col), self.STYLE_REGULAR)
+
             self.current_row += 1
 
         # 5. Всего по позиции
@@ -718,11 +713,11 @@ class EstimateExcelExporter:
         if hasattr(item, 'sp_percent') and item.sp_percent:
             total += item.fot * (item.sp_percent / Decimal("100"))
 
-        self._merge_cells(2, 3, self.current_row, self.current_row)
-        cell = self.ws.cell(row=self.current_row, column=2, value="Всего по позиции")
+        # Объединяем колонки 2-3 (только для текста), колонка 12 остаётся отдельно
+        cell = self.ws.cell(row=self.current_row, column=3, value="Всего по позиции")
         self._apply_style(cell, self.STYLE_TOTAL)
-        self.ws.cell(row=self.current_row, column=12, value=round(float(total), 2))
-        self._apply_style(self.ws.cell(row=self.current_row, column=12), self.STYLE_TOTAL)
+        sum_cell = self.ws.cell(row=self.current_row, column=12, value=float(total))
+        self._apply_style(sum_cell, self.STYLE_TOTAL)
         self.current_row += 1
 
     def _write_abstract_resource_item(self, abs_res: AbstractResource) -> None:
@@ -732,26 +727,29 @@ class EstimateExcelExporter:
         self.ws.cell(row=self.current_row, column=2, value=f"ФСБЦ-{abs_res.code}")
         self.ws.cell(row=self.current_row, column=3, value=abs_res.name)
         self.ws.cell(row=self.current_row, column=4, value=abs_res.unit)
-        self.ws.cell(row=self.current_row, column=5, value=round(float(abs_res.quantity), 3))
+
+        # Количество (уже умноженное на объём работ)
+        self.ws.cell(row=self.current_row, column=5, value=float(abs_res.quantity))
         self.ws.cell(row=self.current_row, column=6, value="1")
-        self.ws.cell(row=self.current_row, column=7, value=round(float(abs_res.quantity), 3))
+        self.ws.cell(row=self.current_row, column=7, value=float(abs_res.quantity))
 
         if abs_res.base_price:
-            self.ws.cell(row=self.current_row, column=8, value=round(float(abs_res.base_price), 2))
-        val = self._format_number(abs_res.index, 2)
+            self.ws.cell(row=self.current_row, column=8, value=float(abs_res.base_price))
+
+        val = self._format_number(abs_res.index)
         if val is not None:
             self.ws.cell(row=self.current_row, column=9, value=val)
-        self.ws.cell(row=self.current_row, column=10, value=round(float(abs_res.current_price), 2))
-        self.ws.cell(row=self.current_row, column=12, value=round(float(abs_res.total_cost), 2))
+
+        self.ws.cell(row=self.current_row, column=10, value=float(abs_res.current_price))
+        self.ws.cell(row=self.current_row, column=12, value=float(abs_res.total_cost))
 
         for col in range(1, 13):
             self._apply_style(self.ws.cell(row=self.current_row, column=col), self.STYLE_WORK_MAIN)
         self.current_row += 1
 
-        self._merge_cells(2, 3, self.current_row, self.current_row)
-        cell = self.ws.cell(row=self.current_row, column=2, value="Всего по позиции")
+        cell = self.ws.cell(row=self.current_row, column=3, value="Всего по позиции")
         self._apply_style(cell, self.STYLE_TOTAL)
-        self.ws.cell(row=self.current_row, column=12, value=round(float(abs_res.total_cost), 2))
+        self.ws.cell(row=self.current_row, column=12, value=float(abs_res.total_cost))
         self._apply_style(self.ws.cell(row=self.current_row, column=12), self.STYLE_TOTAL)
         self.current_row += 1
 
