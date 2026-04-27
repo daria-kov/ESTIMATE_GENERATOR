@@ -1,22 +1,28 @@
 from decimal import Decimal
 from pathlib import Path
+import json
 
-from classes import Estimate, EstimateMetadata, Section, SectionSummary, RowType, Coefficient
+from classes import Estimate, EstimateMetadata, Section, Coefficient, WorkItem
 from export import EstimateExcelExporter
 from norm_parser import NormParser
 from calculator import Calculator
 from normative_rates_parser import NormativeRatesParser
 
 
-def create_estimate_with_gesn_parser() -> Estimate:
-    """Создать смету с использованием парсера ГЭСН и калькулятора"""
+def create_estimate_from_json(json_path: Path) -> Estimate:
+    """Создать смету из JSON файла (output.json)"""
 
+    with open(json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    # Метаданные из JSON
     metadata = EstimateMetadata(
-        software_name="Пример ЛС БИМ для ФГИС ЦС",
-        estimate_number="ЛС-02-01-01",
-        estimate_title="Пример локального сметного расчета (сметы)_базисно-индексный метод с применением индексов по элементам прямых затрат",
-        region="г. Москва",
-        zone="Центральная",
+        software_name=data.get("software_name", ""),
+        estimate_number=data.get("estimate_number", ""),
+        estimate_title=data.get("estimate_title", ""),
+        region=data.get("region", ""),
+        zone=data.get("zone", ""),
+        method="ресурсно-индексным",
     )
 
     estimate = Estimate(metadata=metadata)
@@ -40,7 +46,7 @@ def create_estimate_with_gesn_parser() -> Estimate:
         fsbc_materials_path=str(fsbc_materials) if fsbc_materials.exists() else None
     )
 
-    # Загружаем парсер НР/СП
+    # Загружаем парсер НР/СП из Excel
     nrsp_parser = None
     if nrsp_file.exists():
         try:
@@ -49,78 +55,75 @@ def create_estimate_with_gesn_parser() -> Estimate:
         except Exception as e:
             print(f"Ошибка при загрузке файла НР/СП: {e}")
 
-    # Входные данные: список кодов работ и объёмов
-    user_input = [
-        {"code": "ГЭСН06-01-004-04", "quantity": Decimal("9")},
-        {"code": "ГЭСН11-01-011-03", "quantity": Decimal("0.43")}
-    ]
+    # Проход по разделам из JSON
+    for section_name, work_items_data in data["smeta_level"].items():
+        section = Section(id=0, name=section_name)
 
-    # Создаём раздел
-    section = Section(id=0, name="Общестроительные работы")
+        for item_data in work_items_data:
+            # Объём из gesn_unit.value
+            quantity = Decimal(str(item_data["gesn_unit"]["value"]))
 
-    # Общие коэффициенты (применяются ко всем позициям)
-    common_coefficients = [
-        Coefficient(
-            code="421/пр_2020_прил.10_т.5_п.3_гр.3",
-            description="Производство ремонтно-строительных работ... ОЗП=1,15; ЭМ=1,15; ЗПМ=1,15; ТЗ=1,15; ТЗМ=1,15",
-            values={"ОЗП": Decimal("1.15"), "ЭМ": Decimal("1.15"), "ЗПМ": Decimal("1.15"), "ТЗ": Decimal("1.15"), "ТЗМ": Decimal("1.15")},
-        ),
-        Coefficient(
-            code="421/пр_2020_п.58_пп.б",
-            description="При применении сметных норм... ОЗП=1,15; ЭМ=1,25; ЗПМ=1,25; ТЗ=1,15; ТЗМ=1,25",
-            values={"ОЗП": Decimal("1.15"), "ЭМ": Decimal("1.25"), "ЗПМ": Decimal("1.25"), "ТЗ": Decimal("1.15"), "ТЗМ": Decimal("1.25")},
-        ),
-    ]
+            # Парсим норму с передачей mapping для AbstractResource
+            work_item = parser.parse_work_by_code(
+                work_code=item_data["code"],
+                quantity=quantity,
+                abstract_resource_mapping=item_data.get("AbstractResource", {})
+            )
 
-    for item_data in user_input:
-        work_item = parser.parse_work_by_code(
-            work_code=item_data["code"],
-            quantity=item_data["quantity"],
-        )
+            if work_item is None:
+                print(f"Норма не найдена: {item_data['code']}")
+                continue
 
-        if work_item is None:
-            print(f"Норма не найдена: {item_data['code']}")
-            continue
+            conversion = item_data.get("conversion", {})
+            work_item.conversion_string = conversion.get("translation_string")
 
-        # Применяем коэффициенты
-        work_item.coefficients = common_coefficients.copy()
+            # Применяем коэффициенты
+            work_item.coefficients = []
+            for coef_data in item_data.get("coefficients", []):
+                work_item.coefficients.append(Coefficient(
+                    code=coef_data["code"],
+                    description=coef_data["description"],
+                    values={k: Decimal(str(v)) for k, v in coef_data["values"].items()}
+                ))
 
-        # Применяем нормативы НР/СП
-        if nrsp_parser and work_item.nr_code:
-            base_nr, base_sp = nrsp_parser.get_by_code(work_item.nr_code)
+            # Понижающие коэффициенты для НР и СП
+            work_item.nr_reduction = Decimal(str(item_data.get("reduction_nr", 1.0)))
+            work_item.sp_reduction = Decimal(str(item_data.get("reduction_sp", 1.0)))
 
-            reduction_nr = Decimal("0.9")
-            reduction_sp = Decimal("0.85")
+            # НР/СП из Excel (по nr_code из XML)
+            if nrsp_parser and work_item.nr_code:
+                base_nr, base_sp = nrsp_parser.get_by_code(work_item.nr_code, region_type="territory")
 
-            work_item.base_nr_percent = base_nr
-            work_item.base_sp_percent = base_sp
-            work_item.nr_reduction = reduction_nr
-            work_item.sp_reduction = reduction_sp
-            work_item.nr_percent = base_nr * reduction_nr
-            work_item.sp_percent = base_sp * reduction_sp
+                work_item.base_nr_percent = base_nr
+                work_item.base_sp_percent = base_sp
+                work_item.nr_percent = base_nr * work_item.nr_reduction
+                work_item.sp_percent = base_sp * work_item.sp_reduction
 
-        section.items.append(work_item)
+            section.items.append(work_item)
 
-    # Назначаем номера позиций (начиная с 12, как в образце)
-    for idx, item in enumerate(section.items):
-        item.row_num = idx
-
-    estimate.add_section(section)
-
-    # Выполняем расчёт
-    calculator = Calculator(indices=metadata.indices)
-    calculator.calculate_section(section)
+        estimate.add_section(section)
 
     return estimate
 
 
 if __name__ == "__main__":
-    estimate = create_estimate_with_gesn_parser()
+    input_json = Path(__file__).parent / "output.json"
+
+    if not input_json.exists():
+        print(f"Файл {input_json} не найден!")
+        exit(1)
+
+    estimate = create_estimate_from_json(input_json)
+
+    # Выполняем расчёт для каждого раздела
+    calculator = Calculator(indices=estimate.metadata.indices)
+    for section in estimate.sections:
+        calculator.calculate_section(section)
 
     output_dir = Path(__file__).parent / "output"
     output_dir.mkdir(exist_ok=True)
 
-    filepath = output_dir / "смета_гэсн_пример.xlsx"
+    filepath = output_dir / "Пример_сметы.xlsx"
 
     exporter = EstimateExcelExporter(estimate)
     exporter.export(str(filepath))
