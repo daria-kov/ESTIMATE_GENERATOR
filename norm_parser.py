@@ -14,6 +14,30 @@ from price_parser import PriceParser
 from resource_classifier import ResourceClassifier
 from utils import apply_price_data
 
+def _safe_decimal(value: str, default: Decimal = Decimal("0")) -> Decimal:
+    """Безопасное преобразование строки в Decimal с обработкой запятых и пробелов"""
+    if not value or not str(value).strip():
+        return default
+
+    value_str = str(value).strip()
+
+    # Заменяем запятую на точку (российский формат чисел)
+    value_str = value_str.replace(',', '.')
+
+    # Удаляем пробелы внутри числа
+    value_str = value_str.replace(' ', '')
+
+    # Если строка пустая после очистки
+    if not value_str:
+        return default
+
+    try:
+        return Decimal(value_str)
+    except:
+        # Если преобразование не удалось, выводим предупреждение
+        print(f"  Предупреждение: не удалось преобразовать '{value}' в число, используем 0")
+        return default
+
 
 class NormParser:
     """
@@ -209,12 +233,20 @@ class NormParser:
         for res_elem in resources_elem.findall('Resource'):
             code = res_elem.get('Code', '')
 
+            # Логируем проблемный ресурс
+            quantity_raw = res_elem.get('Quantity', '0')
+            if quantity_raw == 'П':
+                print(f"  Найден ресурс с Quantity='П': code={code}, name={res_elem.get('EndName', '')}")
+
             # Пропускаем служебные ресурсы (групповые строки ОТ, ЭМ, М)
             if code in self.SKIP_RESOURCE_CODES:
                 continue
 
             name = res_elem.get('EndName', '')
-            quantity = Decimal(res_elem.get('Quantity', '0'))
+
+            # Безопасное преобразование Quantity
+            quantity = _safe_decimal(quantity_raw)
+
             unit = res_elem.get('MeasureUnit', None)
 
             # Определяем тип ресурса (машина/материал/рабочий)
@@ -273,15 +305,17 @@ class NormParser:
 
         return resources
 
-    def _parse_abstract_resources(self, work_element: ET.Element) -> List[AbstractResource]:
+    def _parse_abstract_resources(self, work_element: ET.Element,
+                               mapping: Dict[str, dict] = None,
+                               work_quantity: Decimal = Decimal("1")) -> List[AbstractResource]:
         """
-        Распарсить абстрактные ресурсы (бетон, арматура и т.д.).
+        Распарсить абстрактные ресурсы (бетон, арматура и т.д.)
+        Только те, которые указаны в mapping из output.json
 
         Args:
             work_element: XML-элемент Work
-
-        Returns:
-            Список абстрактных ресурсов
+            mapping: Словарь из output.json (AbstractResource)
+            work_quantity: Объём работ
         """
         abstract_resources = []
         resources_elem = work_element.find('Resources')
@@ -289,38 +323,97 @@ class NormParser:
         if resources_elem is None:
             return abstract_resources
 
+        # Если mapping не передан или пустой, не добавляем ни одного абстрактного ресурса
+        if not mapping:
+            print(f"  Нет маппинга для AbstractResource, пропускаем все абстрактные ресурсы")
+            return abstract_resources
+
         for abs_elem in resources_elem.findall('AbstractResource'):
             code = abs_elem.get('Code', '')
-            name = abs_elem.get('Name', '')
+            quantity_raw = abs_elem.get('Quantity', '0')
+
+            # Логируем проблемный ресурс
+            if quantity_raw == 'П':
+                print(f"  Найден AbstractResource с Quantity='П': code={code}, name={abs_elem.get('Name', '')}")
+
+            name_from_gesn = abs_elem.get('Name', '')
             unit = abs_elem.get('MeasureUnit', '')
-            quantity = abs_elem.get('Quantity', '0')
             tech_groups = abs_elem.get('TechnologyGroups', '')
 
-            # Пропускаем пустые или нулевые ресурсы
-            if not code or quantity == '0' or quantity == 'П':
+            # Пропускаем пустые коды
+            if not code:
                 continue
 
-            quantity_dec = Decimal(quantity) if quantity != 'П' else Decimal("0")
+            # ✅ ПРОВЕРКА: если код абстрактного ресурса НЕ указан в mapping, пропускаем его
+            if code not in mapping:
+                print(f"  AbstractResource {code} не найден в output.json, пропускаем")
+                continue
 
-            abstract_res = AbstractResource(
-                code=code,
-                name=name,
-                unit=unit,
-                quantity=quantity_dec,
-                technology_groups=tech_groups,
-            )
+            # Пропускаем, если quantity = 0 или 'П'
+            if quantity_raw == '0' or quantity_raw == 'П':
+                print(f"  AbstractResource {code} имеет quantity='{quantity_raw}', пропускаем")
+                continue
 
-            # Загружаем цены из сплит-формы
+            # Безопасное преобразование Quantity
+            qty_per_unit = _safe_decimal(quantity_raw)
+
+            # ИТОГОВОЕ КОЛИЧЕСТВО = норма × объём работ
+            total_quantity = qty_per_unit * work_quantity
+
+            # Уточнённый код для поиска цены в сплит-форме
+            actual_code = code
+            refined_codes = mapping[code].get("code", [])
+            if refined_codes:
+                actual_code = refined_codes[0]
+                print(f"  AbstractResource: {code} → {actual_code} (норма {qty_per_unit} × {work_quantity} = {total_quantity} {unit})")
+            else:
+                print(f"  AbstractResource: {code} не имеет уточнённого кода в mapping, используем исходный {code}")
+
+            # Ищем цену и название в сплит-форме
+            resource_name = name_from_gesn  # по умолчанию имя из ГЭСН
+            base_price = None
+            current_price = None
+            price_index = Decimal("1.0")
+
             if self.price_parser:
-                price_data = self.price_parser.lookup(code)
+                price_data = self.price_parser.lookup(actual_code)
                 # Если не нашли, пробуем добавить типовой префикс
                 if not price_data:
                     for prefix in ['01.', '02.', '03.', '04.', '08.', '11.']:
-                        test_code = f"{prefix}{code}"
+                        test_code = f"{prefix}{actual_code}"
                         price_data = self.price_parser.lookup(test_code)
                         if price_data:
+                            print(f"Нашёл цену по коду {test_code}")
                             break
-                apply_price_data(abstract_res, price_data)
+
+                if price_data:
+                    # Берём название из сплит-формы, если оно там есть
+                    if 'name' in price_data and price_data['name']:
+                        resource_name = price_data['name']
+                    if 'base_price' in price_data:
+                        base_price = Decimal(str(price_data['base_price']))
+                    if 'current_price' in price_data:
+                        current_price = Decimal(str(price_data['current_price']))
+                    if 'index' in price_data:
+                        price_index = Decimal(str(price_data['index']))
+                else:
+                    print(f"  Цена не найдена для {actual_code}")
+
+            abstract_res = AbstractResource(
+                code=actual_code,
+                name=resource_name,
+                unit=unit,
+                quantity=total_quantity,
+                technology_groups=tech_groups,
+                base_price=base_price,
+                index=price_index,
+                current_price=current_price or (base_price * price_index if base_price else Decimal("0")),
+                total_cost=Decimal("0"),
+            )
+
+            # Рассчитываем общую стоимость
+            if abstract_res.current_price:
+                abstract_res.total_cost = total_quantity * abstract_res.current_price
 
             abstract_resources.append(abstract_res)
 
@@ -382,13 +475,16 @@ class NormParser:
                 components[key] += res.quantity_per_unit
         return components
 
-    def parse_work_by_code(self, work_code: str, quantity: Decimal = Decimal("1")) -> Optional[WorkItem]:
+    def parse_work_by_code(self, work_code: str, quantity: Decimal = Decimal("1"),
+                           abstract_resource_mapping: Dict[str, dict] = None) -> Optional[WorkItem]:
         """
         Основной метод: загрузить норматив по коду и создать WorkItem.
 
         Args:
             work_code: Полный код работы (например, "ГЭСНр57-01-002-01")
             quantity: Объём работ
+            abstract_resource_mapping: Словарь уточнённых кодов абстрактных ресурсов
+                                       из output.json (общий_код -> {code: [уточнённый_код]})
 
         Returns:
             WorkItem или None, если норматив не найден
@@ -429,9 +525,13 @@ class NormParser:
             quantity=quantity,
         )
 
-        # Парсим ресурсы и абстрактные ресурсы
+        # Парсим ресурсы и абстрактные ресурсы (с передачей mapping)
         work_item.resources = self._parse_resources(work_element)
-        work_item.abstract_resources = self._parse_abstract_resources(work_element)
+        work_item.abstract_resources = self._parse_abstract_resources(
+            work_element,
+            abstract_resource_mapping,
+            quantity  # ← добавляем объём работ
+        )
 
         # Парсим ссылки на НР/СП
         overhead_ref, profit_ref = self._parse_nrsp(work_element)
